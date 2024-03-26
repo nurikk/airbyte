@@ -8,7 +8,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.airbyte.cdk.db.jdbc.JdbcDatabase;
 import io.airbyte.cdk.integrations.base.JavaBaseConstants;
 import io.airbyte.cdk.integrations.base.TypingAndDedupingFlag;
-import io.airbyte.cdk.integrations.destination_async.partial_messages.PartialAirbyteMessage;
+import io.airbyte.cdk.integrations.destination.async.partial_messages.PartialAirbyteMessage;
 import io.airbyte.commons.exceptions.ConfigErrorException;
 import io.airbyte.commons.json.Jsons;
 import java.io.File;
@@ -25,23 +25,13 @@ import java.util.UUID;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
 
-@SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 public abstract class JdbcSqlOperations implements SqlOperations {
 
   protected static final String SHOW_SCHEMAS = "show schemas;";
   protected static final String NAME = "name";
-
-  // this adapter modifies record message before inserting them to the destination
-  protected final Optional<DataAdapter> dataAdapter;
   protected final Set<String> schemaSet = new HashSet<>();
 
-  protected JdbcSqlOperations() {
-    this.dataAdapter = Optional.empty();
-  }
-
-  protected JdbcSqlOperations(final DataAdapter dataAdapter) {
-    this.dataAdapter = Optional.of(dataAdapter);
-  }
+  protected JdbcSqlOperations() {}
 
   @Override
   public void createSchemaIfNotExists(final JdbcDatabase database, final String schemaName) throws Exception {
@@ -110,17 +100,25 @@ public abstract class JdbcSqlOperations implements SqlOperations {
   }
 
   protected String createTableQueryV2(final String schemaName, final String tableName) {
+    // Note that Meta is the last column in order, there was a time when tables didn't have meta,
+    // we issued Alter to add that column so it should be the last column.
     return String.format(
         """
         CREATE TABLE IF NOT EXISTS %s.%s (
           %s VARCHAR PRIMARY KEY,
           %s JSONB,
           %s TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-          %s TIMESTAMP WITH TIME ZONE DEFAULT NULL
+          %s TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+          %s JSONB
         );
         """,
-        schemaName, tableName, JavaBaseConstants.COLUMN_NAME_AB_RAW_ID, JavaBaseConstants.COLUMN_NAME_DATA,
-        JavaBaseConstants.COLUMN_NAME_AB_EXTRACTED_AT, JavaBaseConstants.COLUMN_NAME_AB_LOADED_AT);
+        schemaName,
+        tableName,
+        JavaBaseConstants.COLUMN_NAME_AB_RAW_ID,
+        JavaBaseConstants.COLUMN_NAME_DATA,
+        JavaBaseConstants.COLUMN_NAME_AB_EXTRACTED_AT,
+        JavaBaseConstants.COLUMN_NAME_AB_LOADED_AT,
+        JavaBaseConstants.COLUMN_NAME_AB_META);
   }
 
   // TODO: This method seems to be used by Postgres and others while staging to local temp files.
@@ -130,21 +128,16 @@ public abstract class JdbcSqlOperations implements SqlOperations {
         final CSVPrinter csvPrinter = new CSVPrinter(writer, CSVFormat.DEFAULT)) {
       for (final PartialAirbyteMessage record : records) {
         final var uuid = UUID.randomUUID().toString();
-        // TODO we only need to do this is formatData is overridden. If not, we can just do jsonData =
-        // record.getSerialized()
-        final var jsonData = Jsons.serialize(formatData(Jsons.deserializeExact(record.getSerialized())));
+        final var jsonData = record.getSerialized();
+        final var airbyteMeta = Jsons.serialize(record.getRecord().getMeta());
         final var extractedAt = Timestamp.from(Instant.ofEpochMilli(record.getRecord().getEmittedAt()));
         if (TypingAndDedupingFlag.isDestinationV2()) {
-          csvPrinter.printRecord(uuid, jsonData, extractedAt, null);
+          csvPrinter.printRecord(uuid, jsonData, extractedAt, null, airbyteMeta);
         } else {
           csvPrinter.printRecord(uuid, jsonData, extractedAt);
         }
       }
     }
-  }
-
-  protected JsonNode formatData(final JsonNode data) {
-    return data;
   }
 
   @Override
@@ -197,11 +190,6 @@ public abstract class JdbcSqlOperations implements SqlOperations {
                                   final String schemaName,
                                   final String tableName)
       throws Exception {
-    dataAdapter.ifPresent(adapter -> records.forEach(airbyteRecordMessage -> {
-      final JsonNode data = Jsons.deserializeExact(airbyteRecordMessage.getSerialized());
-      adapter.adapt(data);
-      airbyteRecordMessage.setSerialized(Jsons.serialize(data));
-    }));
     if (TypingAndDedupingFlag.isDestinationV2()) {
       insertRecordsInternalV2(database, records, schemaName, tableName);
     } else {
