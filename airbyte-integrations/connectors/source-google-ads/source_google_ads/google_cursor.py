@@ -1,5 +1,4 @@
-from airbyte_cdk.sources.declarative.types import Record
-from airbyte_cdk.sources.streams.concurrent.cursor import ConcurrentCursor, Comparable
+from airbyte_cdk.sources.streams.concurrent.cursor import ConcurrentCursor
 from airbyte_cdk.sources.streams.concurrent.partitions.partition import Partition
 
 

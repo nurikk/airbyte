@@ -40,15 +40,16 @@ class GadsStateConverter(EpochValueConcurrentStreamStateConverter):
             self, cursor_field: CursorField, stream_state: MutableMapping[str, Any], start: datetime
     ) -> Tuple[MutableMapping[str, date], MutableMapping[str, Any]]:
         """
-        Convert the state message to the format required by the ConcurrentCursor.
+        Convert the state message to the format required by the GoogleAdsCursor.
 
         e.g.
         {
-            "state_type": ConcurrencyCompatibleStateType.date_range.value,
-            "metadata": { … },
-            "slices": [
-                {"start": "2021-01-18T21:18:20.000+00:00", "end": "2021-01-18T21:18:20.000+00:00"},
-            ]
+            {
+                "1234567890": "state_type": ConcurrencyCompatibleStateType.date_range.value,
+                "slices": [
+                    {"start": "2021-01-18", "end": "2021-01-18"}
+                ]
+            }
         }
         """
         sync_start = self._get_sync_start(cursor_field, stream_state, start)
@@ -99,7 +100,11 @@ class GadsStateConverter(EpochValueConcurrentStreamStateConverter):
         Convert the state message from the concurrency-compatible format to the stream's original format.
 
         e.g.
-        { "created": "2021-01-18T21:18:20.000Z" }
+        {
+            "1234567890": {
+                "segments.date": "2024-04-05"
+            }
+        }
         """
         new_state = {}
         for customer_id, customer_state in stream_state.items():
@@ -112,11 +117,3 @@ class GadsStateConverter(EpochValueConcurrentStreamStateConverter):
             else:
                 new_state[customer_id] = customer_state
         return new_state
-        # if self.is_state_message_compatible(stream_state):
-        #     legacy_state = stream_state.get("legacy", {})
-        #     latest_complete_time = self._get_latest_complete_time(stream_state.get("slices", []))
-        #     if latest_complete_time is not None:
-        #         legacy_state.update({cursor_field.cursor_field_key: self.output_format(latest_complete_time)})
-        #     return legacy_state or {}
-        # else:
-        #     return stream_state
