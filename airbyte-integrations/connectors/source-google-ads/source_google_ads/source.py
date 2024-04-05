@@ -71,7 +71,9 @@ class SourceGoogleAds(ConcurrentSourceAdapter):
     # Skip exceptions on missing streams
     raise_exception_on_missing_stream = False
 
-    def __init__(self, catalog: Optional[ConfiguredAirbyteCatalog], config: Optional[Mapping[str, Any]], state: TState, **kwargs):
+    def __init__(self, catalog: Optional[ConfiguredAirbyteCatalog] = None,
+                 config: Optional[Mapping[str, Any]] = None,
+                 state: TState = None, **kwargs):
         if config:
             concurrency_level = min(config.get("num_workers", _DEFAULT_CONCURRENCY), _MAX_CONCURRENCY)
         else:
@@ -132,15 +134,18 @@ class SourceGoogleAds(ConcurrentSourceAdapter):
         )
         return incremental_stream_config
 
-    def get_all_accounts(self, google_api: GoogleAds, customers: List[CustomerModel], customer_status_filter: List[str]) -> List[str]:
+    @staticmethod
+    def get_all_accounts(google_api: GoogleAds,
+                         customers: List[CustomerModel],
+                         customer_status_filter: List[str]) -> Iterable[Mapping[str, Any]]:
         customer_clients_stream = CustomerClient(api=google_api, customers=customers, customer_status_filter=customer_status_filter)
-        for slice in customer_clients_stream.stream_slices():
-            for record in customer_clients_stream.read_records(sync_mode=SyncMode.full_refresh, stream_slice=slice):
+        for stream_slice in customer_clients_stream.stream_slices():
+            for record in customer_clients_stream.read_records(sync_mode=SyncMode.full_refresh, stream_slice=stream_slice):
                 yield record
 
     def _get_all_connected_accounts(
         self, google_api: GoogleAds, customer_status_filter: List[str]
-    ) -> Iterable[Iterable[Mapping[str, Any]]]:
+    ) -> Iterable[Mapping[str, Any]]:
         customer_ids = [customer_id for customer_id in google_api.get_accessible_accounts()]
         dummy_customers = [CustomerModel(id=_id, login_customer_id=_id) for _id in customer_ids]
 
@@ -151,7 +156,7 @@ class SourceGoogleAds(ConcurrentSourceAdapter):
         accounts = self._get_all_connected_accounts(google_api, customer_status_filter)
         customers = CustomerModel.from_accounts(accounts)
 
-        # filter duplicates as one customer can be accessible from mutiple connected accounts
+        # filter duplicates as one customer can be accessible from multiple connected accounts
         unique_customers = []
         seen_ids = set()
         for customer in customers:
