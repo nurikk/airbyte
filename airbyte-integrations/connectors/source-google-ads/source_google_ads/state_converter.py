@@ -54,6 +54,8 @@ class GadsStateConverter(EpochValueConcurrentStreamStateConverter):
         sync_start = self._get_sync_start(cursor_field, stream_state, start)
         concurrent_state = {}
         for customer_id, customer_state in stream_state.items():
+            if customer_id not in sync_start:
+                sync_start[customer_id] = self.parse_timestamp(start)
             if self.is_state_message_compatible(customer_state):
                 concurrent_state[customer_id] = stream_state
             else:

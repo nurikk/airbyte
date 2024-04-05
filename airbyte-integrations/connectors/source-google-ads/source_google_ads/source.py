@@ -6,11 +6,10 @@ import datetime
 import functools
 import logging
 import operator
-from typing import Any, Iterable, List, Mapping, MutableMapping, Tuple, Optional, Union, Iterator
+from typing import Any, Iterable, List, Mapping, MutableMapping, Tuple, Optional
 
 import pendulum
 from airbyte_cdk.models import FailureType, SyncMode
-from airbyte_cdk.sources import AbstractSource
 from airbyte_cdk.sources.concurrent_source.concurrent_source import ConcurrentSource
 from airbyte_cdk.sources.concurrent_source.concurrent_source_adapter import ConcurrentSourceAdapter
 from airbyte_cdk.sources.connector_state_manager import ConnectorStateManager
@@ -19,9 +18,8 @@ from airbyte_cdk.sources.source import TState
 from airbyte_cdk.sources.streams import Stream
 from airbyte_cdk.sources.streams.concurrent.adapters import StreamFacade
 from airbyte_cdk.sources.streams.concurrent.cursor import FinalStateCursor, CursorField
-from airbyte_cdk.sources.streams.concurrent.state_converters.datetime_stream_state_converter import EpochValueConcurrentStreamStateConverter
 from airbyte_cdk.utils import AirbyteTracedException
-from airbyte_protocol.models import ConfiguredAirbyteCatalog, AirbyteStateMessage, AirbyteMessage
+from airbyte_protocol.models import ConfiguredAirbyteCatalog
 from pendulum import parse, today
 from pendulum.parsing import ParserError
 
@@ -87,7 +85,7 @@ class SourceGoogleAds(ConcurrentSourceAdapter):
         self.state = state
 
     @staticmethod
-    def _validate_and_transform(config: Mapping[str, Any]):
+    def _validate_and_transform(config: MutableMapping[str, Any]):
         config = copy.deepcopy(config)
         if config.get("end_date") == "":
             config.pop("end_date")
@@ -104,6 +102,10 @@ class SourceGoogleAds(ConcurrentSourceAdapter):
         if "customer_id" in config:
             config["customer_ids"] = config["customer_id"].split(",")
             config.pop("customer_id")
+
+        if "manager_id" in config:
+            config["manager_ids"] = config["manager_id"].split(",")
+            config.pop("manager_id")
 
         return config
 
@@ -144,16 +146,21 @@ class SourceGoogleAds(ConcurrentSourceAdapter):
                 yield record
 
     def _get_all_connected_accounts(
-        self, google_api: GoogleAds, customer_status_filter: List[str]
+        self, google_api: GoogleAds,
+            customer_status_filter: List[str],
+            manager_ids: List[str]
     ) -> Iterable[Mapping[str, Any]]:
-        customer_ids = [customer_id for customer_id in google_api.get_accessible_accounts()]
+        customer_ids = [customer_id for customer_id in google_api.get_accessible_accounts()
+                        if customer_id in manager_ids or len(manager_ids) == 0]
+
         dummy_customers = [CustomerModel(id=_id, login_customer_id=_id) for _id in customer_ids]
 
         yield from self.get_all_accounts(google_api, dummy_customers, customer_status_filter)
 
     def get_customers(self, google_api: GoogleAds, config: Mapping[str, Any]) -> List[CustomerModel]:
         customer_status_filter = config.get("customer_status_filter", [])
-        accounts = self._get_all_connected_accounts(google_api, customer_status_filter)
+        manager_ids = config.get("manager_ids", [])
+        accounts = self._get_all_connected_accounts(google_api, customer_status_filter, manager_ids)
         customers = CustomerModel.from_accounts(accounts)
 
         # filter duplicates as one customer can be accessible from multiple connected accounts
