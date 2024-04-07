@@ -16,7 +16,6 @@ from google.ads.googleads.v15.errors.types.quota_error import QuotaErrorEnum
 class MockSearchRequest:
     customer_id = "12345"
     query = None
-    page_size = 100
     page_token = None
     next_page_token = None
 
