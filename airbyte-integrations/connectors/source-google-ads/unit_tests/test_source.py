@@ -99,15 +99,15 @@ def test_chunk_date_range():
         )
     )
     assert [
-        {"start_date": "2021-02-18", "end_date": "2021-02-27"},
-        {"start_date": "2021-02-28", "end_date": "2021-03-09"},
-        {"start_date": "2021-03-10", "end_date": "2021-03-19"},
-        {"start_date": "2021-03-20", "end_date": "2021-03-29"},
-        {"start_date": "2021-03-30", "end_date": "2021-04-08"},
-        {"start_date": "2021-04-09", "end_date": "2021-04-18"},
-        {"start_date": "2021-04-19", "end_date": "2021-04-28"},
-        {"start_date": "2021-04-29", "end_date": "2021-05-04"},
-    ] == slices
+               {"start_date": "2021-02-18", "end_date": "2021-02-27"},
+               {"start_date": "2021-02-28", "end_date": "2021-03-09"},
+               {"start_date": "2021-03-10", "end_date": "2021-03-19"},
+               {"start_date": "2021-03-20", "end_date": "2021-03-29"},
+               {"start_date": "2021-03-30", "end_date": "2021-04-08"},
+               {"start_date": "2021-04-09", "end_date": "2021-04-18"},
+               {"start_date": "2021-04-19", "end_date": "2021-04-28"},
+               {"start_date": "2021-04-29", "end_date": "2021-05-04"},
+           ] == slices
 
 
 def test_streams_count(config, mock_get_customers):
@@ -143,12 +143,12 @@ def test_read_missing_stream(config, mock_get_customers):
 
 @pytest.mark.parametrize(
     (
-        "query",
-        "is_metrics_in_query",
+            "query",
+            "is_metrics_in_query",
     ),
     (
-        ("SELECT customer.id, metrics.conversions, campaign.start_date FROM campaign", True),
-        ("SELECT segments.ad_destination_type, campaign.start_date, campaign.end_date FROM campaign", False),
+            ("SELECT customer.id, metrics.conversions, campaign.start_date FROM campaign", True),
+            ("SELECT segments.ad_destination_type, campaign.start_date, campaign.end_date FROM campaign", False),
     ),
 )
 def test_metrics_in_custom_query(query, is_metrics_in_query):
@@ -159,9 +159,9 @@ def test_metrics_in_custom_query(query, is_metrics_in_query):
 @pytest.mark.parametrize(
     ("latest_record", "current_state", "expected_state"),
     (
-        ({"segments.date": "2020-01-01"}, {}, {"segments.date": "2020-01-01"}),
-        ({"segments.date": "2020-02-01"}, {"segments.date": "2020-01-01"}, {"segments.date": "2020-02-01"}),
-        ({"segments.date": "2021-03-03"}, {"1234567890": {"segments.date": "2020-02-01"}}, {"segments.date": "2021-03-03"}),
+            ({"segments.date": "2020-01-01"}, {}, {"segments.date": "2020-01-01"}),
+            ({"segments.date": "2020-02-01"}, {"segments.date": "2020-01-01"}, {"segments.date": "2020-02-01"}),
+            ({"segments.date": "2021-03-03"}, {"1234567890": {"segments.date": "2020-02-01"}}, {"segments.date": "2021-03-03"}),
     ),
 )
 def test_updated_state(stream_mock, latest_record, current_state, expected_state):
@@ -189,7 +189,7 @@ def stream_instance(query, api_mock, **kwargs):
     "original_query, expected_query",
     [
         (
-            """
+                """
     SELECT
       campaign.id,
       campaign.name,
@@ -200,7 +200,7 @@ def stream_instance(query, api_mock, **kwargs):
     AND metrics.impressions > 100
     ORDER BY campaign.status
     """,
-            """
+                """
     SELECT
       campaign.id,
       campaign.name,
@@ -215,7 +215,7 @@ def stream_instance(query, api_mock, **kwargs):
     """,
         ),
         (
-            """
+                """
     SELECT
       campaign.id,
       campaign.name,
@@ -224,7 +224,7 @@ def stream_instance(query, api_mock, **kwargs):
     FROM campaign
     ORDER BY campaign.status
     """,
-            """
+                """
     SELECT
       campaign.id,
       campaign.name,
@@ -237,7 +237,7 @@ def stream_instance(query, api_mock, **kwargs):
     """,
         ),
         (
-            """
+                """
     SELECT
       campaign.id,
       campaign.name,
@@ -247,7 +247,7 @@ def stream_instance(query, api_mock, **kwargs):
     WHERE campaign.status = 'PAUSED'
     AND metrics.impressions > 100
     """,
-            """
+                """
     SELECT
       campaign.id,
       campaign.name,
@@ -261,7 +261,7 @@ def stream_instance(query, api_mock, **kwargs):
     """,
         ),
         (
-            """
+                """
     SELECT
         campaign.accessible_bidding_strategy,
         segments.ad_destination_type,
@@ -269,7 +269,7 @@ def stream_instance(query, api_mock, **kwargs):
         campaign.end_date
     FROM campaign
     """,
-            """
+                """
     SELECT
         campaign.accessible_bidding_strategy,
         segments.ad_destination_type,
@@ -374,15 +374,22 @@ def test_google_type_conversion(mock_fields_meta_data, customers):
         assert desired_mapping[prop] == value.get("type"), f"{prop} should be {value}"
 
 
-def test_check_connection_should_pass_when_config_valid(mocker):
+@pytest.fixture
+def mock_get_many_customers(mocker):
+    mocker.patch(
+        "source_google_ads.source.SourceGoogleAds.get_customers",
+        Mock(return_value=[
+                              CustomerModel(is_manager_account=False, time_zone="Europe/Berlin", id="123"),
+                              CustomerModel(is_manager_account=True, time_zone="Europe/Berlin", id="123"),
+                          ] * 100),
+    )
+
+
+def test_check_connection_should_pass_when_config_valid(mocker, mock_get_many_customers):
     mock_google_api_client = MagicMock()
     mock_google_api_class = Mock(return_value=mock_google_api_client)
     mocker.patch("source_google_ads.source.GoogleAds", mock_google_api_class)
     source = SourceGoogleAds()
-    source.get_customers = lambda *args, **kwargs: [
-                                                       CustomerModel(is_manager_account=False, time_zone="Europe/Berlin", id="123"),
-                                                       CustomerModel(is_manager_account=True, time_zone="Europe/Berlin", id="123"),
-                                                   ] * 100
     check_successful, message = source.check_connection(
         logging.getLogger('airbyte'),
         {
@@ -476,32 +483,32 @@ def mock_send_request(query: str, customer_id: str, login_customer_id: str = "de
     "customer_status_filter, expected_ids, send_request_calls",
     [
         (
-            [],
-            ["123", "456", "789"],
-            [
-                call(
-                    "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client",
-                    customer_id="123",
-                ),
-                call(
-                    "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client",
-                    customer_id="789",
-                ),
-            ],
+                [],
+                ["123", "456", "789"],
+                [
+                    call(
+                        "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client",
+                        customer_id="123",
+                    ),
+                    call(
+                        "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client",
+                        customer_id="789",
+                    ),
+                ],
         ),  # Empty filter, expect all customers
         (
-            ["active"],
-            ["123", "789"],
-            [
-                call(
-                    "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client WHERE customer_client.status in ('active')",
-                    customer_id="123",
-                ),
-                call(
-                    "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client WHERE customer_client.status in ('active')",
-                    customer_id="789",
-                ),
-            ],
+                ["active"],
+                ["123", "789"],
+                [
+                    call(
+                        "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client WHERE customer_client.status in ('active')",
+                        customer_id="123",
+                    ),
+                    call(
+                        "SELECT customer_client.client_customer, customer_client.level, customer_client.id, customer_client.manager, customer_client.time_zone, customer_client.status FROM customer_client WHERE customer_client.status in ('active')",
+                        customer_id="789",
+                    ),
+                ],
         ),  # Non-empty filter, expect filtered customers
     ],
 )

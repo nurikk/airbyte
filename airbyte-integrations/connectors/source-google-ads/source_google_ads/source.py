@@ -1,20 +1,33 @@
 #
 # Copyright (c) 2023 Airbyte, Inc., all rights reserved.
 #
+import copy
+import datetime
 import functools
 import logging
 import operator
-from typing import Any, Iterable, List, Mapping, MutableMapping, Tuple
+from typing import Any, Iterable, List, Mapping, MutableMapping, Tuple, Optional
 
+import pendulum
 from airbyte_cdk.models import FailureType, SyncMode
-from airbyte_cdk.sources import AbstractSource
+from airbyte_cdk.sources.concurrent_source.concurrent_source import ConcurrentSource
+from airbyte_cdk.sources.concurrent_source.concurrent_source_adapter import ConcurrentSourceAdapter
+from airbyte_cdk.sources.connector_state_manager import ConnectorStateManager
+from airbyte_cdk.sources.message import InMemoryMessageRepository
+from airbyte_cdk.sources.source import TState
 from airbyte_cdk.sources.streams import Stream
+from airbyte_cdk.sources.streams.concurrent.adapters import StreamFacade
+from airbyte_cdk.sources.streams.concurrent.cursor import FinalStateCursor, CursorField
 from airbyte_cdk.utils import AirbyteTracedException
+from airbyte_protocol.models import ConfiguredAirbyteCatalog
 from pendulum import parse, today
+from pendulum.parsing import ParserError
 
 from .custom_query_stream import CustomQuery, IncrementalCustomQuery
 from .google_ads import GoogleAds
+from .google_cursor import GoogleAdsCursor
 from .models import CustomerModel
+from .state_converter import GadsStateConverter
 from .streams import (
     AccountPerformanceReport,
     AdGroup,
@@ -47,13 +60,33 @@ from .streams import (
 )
 from .utils import GAQL, logger, traced_exception
 
+_MAX_CONCURRENCY = 20
+_DEFAULT_CONCURRENCY = 10
 
-class SourceGoogleAds(AbstractSource):
+
+class SourceGoogleAds(ConcurrentSourceAdapter):
+    message_repository = InMemoryMessageRepository(logger.level)
     # Skip exceptions on missing streams
     raise_exception_on_missing_stream = False
 
+    def __init__(self, catalog: Optional[ConfiguredAirbyteCatalog] = None,
+                 config: Optional[Mapping[str, Any]] = None,
+                 state: TState = None, **kwargs):
+        if config:
+            concurrency_level = min(config.get("num_workers", _DEFAULT_CONCURRENCY), _MAX_CONCURRENCY)
+        else:
+            concurrency_level = _DEFAULT_CONCURRENCY
+        logger.info(f"Using concurrent cdk with concurrency level {concurrency_level}")
+        concurrent_source = ConcurrentSource.create(
+            concurrency_level, concurrency_level // 2, logger, self._slice_logger, self.message_repository
+        )
+        super().__init__(concurrent_source)
+        self.catalog = catalog
+        self.state = state
+
     @staticmethod
-    def _validate_and_transform(config: Mapping[str, Any]):
+    def _validate_and_transform(config: MutableMapping[str, Any]):
+        config = copy.deepcopy(config)
         if config.get("end_date") == "":
             config.pop("end_date")
         for query in config.get("custom_queries_array", []):
@@ -69,6 +102,10 @@ class SourceGoogleAds(AbstractSource):
         if "customer_id" in config:
             config["customer_ids"] = config["customer_id"].split(",")
             config.pop("customer_id")
+
+        if "manager_id" in config:
+            config["manager_ids"] = config["manager_id"].split(",")
+            config.pop("manager_id")
 
         return config
 
@@ -99,26 +136,34 @@ class SourceGoogleAds(AbstractSource):
         )
         return incremental_stream_config
 
-    def get_all_accounts(self, google_api: GoogleAds, customers: List[CustomerModel], customer_status_filter: List[str]) -> List[str]:
+    @staticmethod
+    def get_all_accounts(google_api: GoogleAds,
+                         customers: List[CustomerModel],
+                         customer_status_filter: List[str]) -> Iterable[Mapping[str, Any]]:
         customer_clients_stream = CustomerClient(api=google_api, customers=customers, customer_status_filter=customer_status_filter)
-        for slice in customer_clients_stream.stream_slices():
-            for record in customer_clients_stream.read_records(sync_mode=SyncMode.full_refresh, stream_slice=slice):
+        for stream_slice in customer_clients_stream.stream_slices():
+            for record in customer_clients_stream.read_records(sync_mode=SyncMode.full_refresh, stream_slice=stream_slice):
                 yield record
 
     def _get_all_connected_accounts(
-        self, google_api: GoogleAds, customer_status_filter: List[str]
-    ) -> Iterable[Iterable[Mapping[str, Any]]]:
-        customer_ids = [customer_id for customer_id in google_api.get_accessible_accounts()]
+        self, google_api: GoogleAds,
+            customer_status_filter: List[str],
+            manager_ids: List[str]
+    ) -> Iterable[Mapping[str, Any]]:
+        customer_ids = [customer_id for customer_id in google_api.get_accessible_accounts()
+                        if customer_id in manager_ids or len(manager_ids) == 0]
+
         dummy_customers = [CustomerModel(id=_id, login_customer_id=_id) for _id in customer_ids]
 
         yield from self.get_all_accounts(google_api, dummy_customers, customer_status_filter)
 
     def get_customers(self, google_api: GoogleAds, config: Mapping[str, Any]) -> List[CustomerModel]:
         customer_status_filter = config.get("customer_status_filter", [])
-        accounts = self._get_all_connected_accounts(google_api, customer_status_filter)
+        manager_ids = config.get("manager_ids", [])
+        accounts = self._get_all_connected_accounts(google_api, customer_status_filter, manager_ids)
         customers = CustomerModel.from_accounts(accounts)
 
-        # filter duplicates as one customer can be accessible from mutiple connected accounts
+        # filter duplicates as one customer can be accessible from multiple connected accounts
         unique_customers = []
         seen_ids = set()
         for customer in customers:
@@ -276,4 +321,60 @@ class SourceGoogleAds(AbstractSource):
             )
             if query_stream:
                 streams.append(query_stream)
-        return streams
+
+        state_manager = ConnectorStateManager(stream_instance_map={s.name: s for s in streams}, state=self.state)
+        return [self._to_concurrent(stream, self._start_date_to_date(config), state_manager, customers) for stream in streams]
+
+    def _get_sync_mode_from_catalog(self, stream: Stream) -> Optional[SyncMode]:
+        if self.catalog:
+            for catalog_stream in self.catalog.streams:
+                if stream.name == catalog_stream.stream.name:
+                    return catalog_stream.sync_mode
+        return None
+
+    def _to_concurrent(self, stream: Stream, fallback_start, state_manager: ConnectorStateManager, customers: list[CustomerModel]) -> Stream:
+        sync_mode = self._get_sync_mode_from_catalog(stream)
+        if sync_mode == SyncMode.full_refresh:
+            return StreamFacade.create_from_stream(
+                stream,
+                self,
+                logger,
+                {},
+                FinalStateCursor(stream_name=stream.name, stream_namespace=stream.namespace, message_repository=self.message_repository),
+            )
+        if len(stream.cursor_field) == 0:
+            return stream
+        state = state_manager.get_stream_state(stream.name, stream.namespace)
+
+        cursor_field = CursorField(stream.cursor_field) if isinstance(stream.cursor_field, str) else CursorField(stream.cursor_field[0])
+        converter = GadsStateConverter(customers=customers)
+        cursor = GoogleAdsCursor(
+            stream.name,
+            stream.namespace,
+            state_manager.get_stream_state(stream.name, stream.namespace),
+            self.message_repository,
+            state_manager,
+            converter,
+            cursor_field,
+            ("start_date", "end_date"),
+            fallback_start,
+        )
+        return StreamFacade.create_from_stream(stream, self, logger, state, cursor)
+
+    @staticmethod
+    def _start_date_to_date(config: Mapping[str, Any]) -> datetime.date:
+        if "start_date" not in config:
+            return pendulum.datetime(2017, 1, 25).date()  # type: ignore  # pendulum not typed
+
+        start_date = config["start_date"]
+        try:
+            return parse(start_date).date()  # type: ignore  # pendulum not typed
+        except ParserError as e:
+            message = f"Invalid start date {start_date}. Please use YYYY-MM-DD format."
+            raise AirbyteTracedException(
+                message=message,
+                internal_message=message,
+                failure_type=FailureType.config_error,
+            ) from e
+
+
